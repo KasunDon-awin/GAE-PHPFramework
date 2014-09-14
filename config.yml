@@ -1,6 +1,6 @@
 google_api:
-    applicationId: 
-    serviceAccountName:
-    privateKey:
-    datasetId:
+    applicationId: wise-weaver-702 
+    serviceAccountName: 289059933679-nnib15p0skfj9ctfof8fhtcd8ie6qln2@developer.gserviceaccount.com 
+    privateKey: Offerbaguk-3ad5343ade00.p12
+    datasetId: wise-weaver-702
     

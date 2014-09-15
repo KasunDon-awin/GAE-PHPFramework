@@ -8,21 +8,87 @@ abstract class Api {
 
     const TYPE_DATE = 'date';
 
-    protected $keyId = null;
-    protected $keyName = null;
+    protected $kindName;
+    protected $keyId;
+    protected $keyName;
 
-    protected function __construct() {
-        
+    public function __construct() {
+        $this->setKindName(str_replace("Entity\\", "", get_class($this)));
     }
 
-    abstract protected function getKindProperties();
-
-    protected static function getKindName() {
-        throw new \RuntimeException("Unimplemented");
+    public function getKeyId() {
+        return $this->keyId;
     }
 
-    protected static function extractQueryResults($results) {
-        throw new \RuntimeException("Unimplemented");
+    public function getKeyName() {
+        return $this->keyName;
+    }
+
+    public function setKeyId($id) {
+        $this->keyId = $id;
+    }
+
+    public function setKeyName($name) {
+        $this->keyName = sha1($name);
+    }
+
+    protected function getKindProperties() {
+        $propertyMap = [];
+
+        foreach ($this->getPropertyList() as $variable => $value) {
+            if ($this->{$variable} instanceof \DateTime) {
+                $propertyMap[strtoupper($variable)] = $this->createProperty($this->{$variable}, true, 'date');
+            } else {
+                $propertyMap[strtoupper($variable)] = $this->createProperty($this->{$variable}, true);
+            }
+        }
+        return $propertyMap;
+    }
+
+    protected function populate($results) {
+        $class = "\\" . get_class($this);
+        $class = new $class;
+        foreach ($this->getPropertyList() as $variable => $value) {
+            $class->{'set' . ucfirst($variable)}($results[strtoupper($variable)]->getStringValue());
+        }
+        $class->addMemory();
+        return $class;
+    }
+
+    protected function getPropertyList() {
+        $list = [];
+        foreach (get_class_vars(get_class($this)) as $variable => $value) {
+            if (strpos($variable, 'key') !== 0 && strpos($variable, 'kind') !== 0) {
+                $list[$variable] = $value;
+            }
+        }
+        return $list;
+    }
+
+    protected function extractResults($results) {
+        $queryResults = [];
+        foreach ($results as $result) {
+            $entity = $this->populate($result['entity']['properties']);
+            $entity->setKeyId(@$result['entity']['key']['path'][0]['id']);
+            $entity->setKeyName(@$result['entity']['key']['path'][0]['name']);
+            $queryResults[] = $entity;
+        }
+        return $queryResults;
+    }
+
+    protected function getCacheKey($input = null) {
+        $key = (empty($input)) ?
+                (empty($this->keyId)) ? $this->keyName :
+                        $this->keyId : sha1($input);
+        return sprintf("%s_%s", $this->getKindName(), $key);
+    }
+
+    public function setKindName($name) {
+        $this->kindName = $name;
+    }
+
+    public function getKindName() {
+        return $this->kindName;
     }
 
     public function put($txn = null) {
@@ -43,43 +109,28 @@ abstract class Api {
         }
         $req->setMutation($mutation);
         Service::getInstance()->commit($req);
-        $this->onItemWrite();
+        $this->addMemory();
     }
 
-    /**
-     * Fetch an object from the datastore by key name.  Optionally indicate transaction.
-     * @param $key_name
-     * @param $txn
-     */
-    public static function fetchByName($key_name, $txn = null) {
+    public function fetchByName($key_name, $txn = null) {
         $path = new \Google_Service_Datastore_KeyPathElement();
-        $path->setKind(static::getKindName());
+        $path->setKind($this->getKindName());
         $path->setName($key_name);
         $key = Service::getInstance()->createKey();
         $key->setPath([$path]);
-        return self::fetchByKey($key, $txn);
+        return $this->fetch($key, $txn);
     }
 
-    /**
-     * Fetch an object from the datastore by key id.  Optionally indicate transaction.
-     * @param $key_id
-     * @param $txn
-     */
-    public static function fetchById($key_id, $txn = null) {
+    public function fetchById($key_id, $txn = null) {
         $path = new \Google_Service_Datastore_KeyPathElement();
-        $path->setKind(static::getKindName());
+        $path->setKind($this->getKindName());
         $path->setId($key_id);
         $key = Service::getInstance()->createKey();
         $key->setPath([$path]);
-        return self::fetchByKey($key, $txn);
+        return $this->fetch($key, $txn);
     }
 
-    /**
-     * Fetch an object from the datastore by key.  Optionally indicate transaction.
-     * @param $key
-     * @param $txn
-     */
-    private static function fetchByKey($key, $txn = null) {
+    private function fetch($key, $txn = null) {
         $lookup_req = new \Google_Service_Datastore_LookupRequest();
         $lookup_req->setKeys([$key]);
         if ($txn) {
@@ -90,28 +141,23 @@ abstract class Api {
         }
         $response = Service::getInstance()->lookup($lookup_req);
         $found = $response->getFound();
-        $extracted = static::extractQueryResults($found);
-        return $extracted;
+        return $this->extractResults($found);
     }
 
     protected function createEntity() {
         $entity = new \Google_Service_Datastore_Entity();
-        $entity->setKey(self::createKeyForItem($this));
+        $entity->setKey($this->createKey($this));
         $entity->setProperties($this->getKindProperties());
         return $entity;
     }
 
-    /**
-     * Delete a value from the datastore.
-     * @throws UnexpectedValueException
-     */
     public function delete($txn = null) {
         if (empty($this->keyId) && empty($this->keyName)) {
             throw new \UnexpectedValueException("Can't delete entity; ID not defined.");
         }
-        $this->beforeItemDelete();
+        $this->clearMemory();
         $mutation = new \Google_Service_Datastore_Mutation();
-        $mutation->setDelete([self::createKeyForItem($this)]);
+        $mutation->setDelete([$this->createKey($this)]);
         $req = new \Google_Service_Datastore_CommitRequest();
         if ($txn) {
             syslog(LOG_DEBUG, "doing delete in transactional context $txn");
@@ -123,16 +169,13 @@ abstract class Api {
         Service::getInstance()->commit($req);
     }
 
-    /**
-     * Query the Datastore for all entities of this Kind
-     */
-    public static function all() {
-        $query = self::createQuery(static::getKindName());
-        $results = self::executeQuery($query);
-        return static::extractQueryResults($results);
+    public function all() {
+        $query = $this->createQuery($this->getKindName());
+        $results = $this->executeQuery($query);
+        return $this->extractResults($results);
     }
 
-    public static function batchTxnMutate($txn, $batchput, $deletes = []) {
+    public function batchTxnMutate($txn, $batchput, $deletes = []) {
         if (!$txn) {
             throw new \UnexpectedValueException('Transaction value not set.');
         }
@@ -148,8 +191,8 @@ abstract class Api {
             }
         }
         foreach ($deletes as $delitem) {
-            $delitem->beforeItemDelete();
-            $delete_items[] = self::createKeyForItem($delitem);
+            $delitem->clearMemory();
+            $delete_items[] = $this->createKey($delitem);
         }
         $mutation = new Google_Service_Datastore_Mutation();
         if (!empty($insert_auto_id_items)) {
@@ -168,7 +211,7 @@ abstract class Api {
         Service::getInstance()->commit($req);
         // successful commit. Call the onItemWrite method on each of the batch put items
         foreach ($batchput as $item) {
-            $item->onItemWrite();
+            $item->addMemory();
         }
     }
 
@@ -176,7 +219,7 @@ abstract class Api {
      * Do a non-transactional batch put.  Split into sub-batches
      * if the list is too big.
      */
-    public static function putBatch($batchput) {
+    public function putBatch($batchput) {
         $insert_auto_id_items = [];
         $upsert_items = [];
         $batch_limit = 490;
@@ -231,38 +274,26 @@ abstract class Api {
 
         //now, call the onItemWrite method on each of the batch put items
         foreach ($batchput as $item) {
-            $item->onItemWrite();
+            $item->addMemory();
         }
     }
 
-    protected function setKeyId($id) {
-        $this->keyId = $id;
+    protected function addMemory() {
+        $mc = new \Memcache();
+        try {
+            $key = $this->getCacheKey();
+            $mc->add($key, $this, 0, 120);
+        } catch (\Google_Cache_Exception $ex) {
+            syslog(LOG_WARNING, "in onItemWrite: memcache exception");
+        }
     }
 
-    protected function setKeyName($name) {
-        $this->keyName = $name;
+    protected function clearMemory() {
+        $mc = new Memcache();
+        $key = $this->getCacheKey();
+        $mc->delete($key);
     }
 
-    /**
-     * Can be used by derived classes to update in-memory cache when an item is
-     * written.
-     */
-    protected function onItemWrite() {
-        
-    }
-
-    /**
-     * Can be used by derived classes to delete from in-memory cache when an item is
-     * deleted.
-     */
-    protected function beforeItemDelete() {
-        
-    }
-
-    /**
-     * Will create either string or list of strings property,
-     * depending upon parameter passed.
-     */
     protected function createProperty($input, $indexed = false, $type = null) {
         $prop = new \Google_Service_Datastore_Property();
         if (is_string($input)) {
@@ -285,10 +316,7 @@ abstract class Api {
         return $prop;
     }
 
-    /**
-     * Create a query object for the given Kind.
-     */
-    protected static function createQuery($kind_name) {
+    protected function createQuery($kind_name) {
         $query = new \Google_Service_Datastore_Query();
         $kind = new \Google_Service_Datastore_KindExpression();
         $kind->setName($kind_name);
@@ -296,28 +324,18 @@ abstract class Api {
         return $query;
     }
 
-    /**
-     * Execute the given query and return the results.
-     */
-    protected static function executeQuery($query) {
+    protected function executeQuery($query) {
         $req = new \Google_Service_Datastore_RunQueryRequest();
         $req->setQuery($query);
         $response = Service::getInstance()->runQuery($req);
 
         if (isset($response['batch']['entityResults'])) {
             return $response['batch']['entityResults'];
-        } else {
-            return [];
         }
+        return [];
     }
 
-    /**
-     * Create a query filter on a string property.
-     * @param $name
-     * @param $value
-     * @param $operator
-     */
-    protected static function createStringFilter($name, $value, $operator = 'equal') {
+    protected function createStringFilter($name, $value, $operator = 'equal') {
         $filter_value = new \Google_Service_Datastore_Value();
         $filter_value->setStringValue($value);
         $property_ref = new \Google_Service_Datastore_PropertyReference();
@@ -331,13 +349,7 @@ abstract class Api {
         return $filter;
     }
 
-    /**
-     * Create a query filter on a date property.
-     * @param $name property name
-     * @param $value property value
-     * @param $operator filter operator
-     */
-    protected static function createDateFilter($name, $value, $operator = 'greaterThan') {
+    protected function createDateFilter($name, $value, $operator = 'greaterThan') {
         $date_value = new \Google_Service_Datastore_Value();
         $date_time = new DateTime($value);
         $date_value->setDateTimeValue($date_time->format(DateTime::ATOM));
@@ -352,13 +364,7 @@ abstract class Api {
         return $filter;
     }
 
-    /**
-     * Create a property 'order' and add it to a datastore query
-     * @param $query the datastore query object
-     * @param $name property name
-     * @param $direction sort direction
-     */
-    protected static function addOrder($query, $name, $direction = 'descending') {
+    protected function orderBy($query, $name, $direction = 'descending') {
         $order = new \Google_Service_Datastore_PropertyOrder();
         $property_ref = new \Google_Service_Datastore_PropertyReference();
         $property_ref->setName($name);
@@ -367,11 +373,7 @@ abstract class Api {
         $query->setOrder([$order]);
     }
 
-    /**
-     * Create a composite 'and' filter.
-     * @param $filters Array of filters
-     */
-    protected static function createCompositeFilter($filters) {
+    protected function createCompositeFilter($filters) {
         $composite_filter = new \Google_Service_Datastore_CompositeFilter();
         $composite_filter->setOperator('and');
         $composite_filter->setFilters($filters);
@@ -380,12 +382,25 @@ abstract class Api {
         return $filter;
     }
 
-    /**
-     * Generate the Key for the item.
-     * @param $item
-     */
-    protected static function createKeyForItem($item) {
+    public function fetchBy($input, $type) {
+        $mc = new \Memcache();
+        $key = $this->getCacheKey($input);
+        $response = $mc->get($key);
+        if ($response) {
+            return [$response];
+        }
+
+        $query = $this->createQuery($this->getKindName());
+        $inputFilter = $this->createStringFilter($type, $input);
+        $inputFilter = $this->createCompositeFilter([$inputFilter]);
+        $query->setFilter($inputFilter);
+        $results = $this->executeQuery($query);
+        return $this->extractResults($results);
+    }
+
+    protected function createKey($item) {
         $path = new \Google_Service_Datastore_KeyPathElement();
+
         $path->setKind($item->getKindName());
         // Sanity check
         if (!empty($item->keyId) && !empty($item->keyName)) {

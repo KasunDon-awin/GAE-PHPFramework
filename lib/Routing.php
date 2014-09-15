@@ -1,3 +1,3 @@
 <?php
 
-$app->get('/hello.json', "default.controller:indexAction");
+$app->get('/', "default.controller:indexAction");
